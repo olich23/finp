@@ -2,14 +2,15 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
-// Принимаем ЛЮБОЙ формат данных
+// Улучшенный парсер входящих данных
 app.use((req, res, next) => {
   let data = '';
   req.on('data', chunk => data += chunk);
   req.on('end', () => {
     try {
       req.rawBody = data;
-      req.body = data.includes('{') ? JSON.parse(data) : data;
+      // Пытаемся распарсить JSON, если нет - оставляем как текст
+      req.body = data.trim().startsWith('{') ? JSON.parse(data) : data;
     } catch (e) {
       req.body = data;
     }
@@ -24,22 +25,29 @@ app.post('/webhook', async (req, res) => {
   try {
     let text = '';
     
-    // Обрабатываем все возможные форматы
+    // Получаем текст из разных форматов
     if (typeof req.body === 'object') {
-      text = req.body.text || JSON.stringify(req.body);
+      text = req.body.text || req.body.toString();
     } else {
       text = req.body.toString();
     }
 
+    // Фильтр рекурсии (должен быть ПЕРЕД отправкой!)
+    if (text.includes('▲') || text.includes('Уведомление:')) {
+      console.log('Игнорируем рекурсивное сообщение:', text.slice(0, 50));
+      return res.status(200).send('OK (ignored)');
+    }
+
+    // Отправляем только ОДИН раз
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       chat_id: CHAT_ID,
-      text: `🔔 Уведомление: ${text.slice(0, 300)}` // Обрезаем длинный текст
+      text: `📢 ${text.slice(0, 300)}` // Используем другой префикс
     });
     
     res.status(200).send('OK');
   } catch (error) {
-    console.error('Ошибка:', error);
-    res.status(200).send('OK'); // Все равно отвечаем 200, чтобы MacroDroid не повторял запрос
+    console.error('Ошибка:', error.message);
+    res.status(200).send('OK');
   }
 });
 
