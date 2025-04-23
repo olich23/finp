@@ -1,20 +1,13 @@
 const express = require('express');
 const axios = require('axios');
-const crypto = require('crypto');
 const app = express();
 
-// Универсальный парсер входящих данных
+// Полностью отключаем все парсеры
 app.use((req, res, next) => {
   let data = '';
   req.on('data', chunk => data += chunk);
   req.on('end', () => {
-    try {
-      req.rawBody = data;
-      // Пытаемся распарсить JSON, если нет - оставляем как текст
-      req.body = data.trim().startsWith('{') ? JSON.parse(data) : data;
-    } catch (e) {
-      req.body = data;
-    }
+    req.rawBody = data;
     next();
   });
 });
@@ -22,63 +15,47 @@ app.use((req, res, next) => {
 const BOT_TOKEN = '7581556039:AAHLKcFBAa4sEf_7IzMbJkmgwCzTSR4bYmI';
 const CHAT_ID = '7098678847';
 
-// Для хранения уникальных сообщений
-const messageStore = new Map();
-const MAX_STORE_SIZE = 100;
-
-// Функция очистки сообщения
-const cleanNotification = (text) => {
-  return text
-    .replace(/<[^>]+>/g, '') // Удаляем HTML-теги
-    .replace(/[-\•\*\[\]]/g, '') // Удаляем спецсимволы
-    .replace(/\s+/g, ' ') // Заменяем множественные пробелы
-    .replace(/(\d{1,2}:\d{2})\s+/g, '') // Удаляем время типа "1:21"
-    .trim();
-};
+// Простейший кэш последних сообщений
+const lastMessage = { text: '', time: 0 };
 
 app.post('/webhook', async (req, res) => {
   try {
-    // Получаем текст из любого формата
-    const rawText = typeof req.body === 'object' 
-      ? JSON.stringify(req.body) 
-      : String(req.body);
+    // Берем только первые 300 символов
+    const rawText = req.rawBody.toString().slice(0, 300);
     
-    // Очищаем текст
-    const cleanText = cleanNotification(rawText);
+    // 1. Удаляем всё после последнего перевода строки
+    let cleanText = rawText.split('\n')[0];
     
-    // Пропускаем пустые сообщения
-    if (!cleanText || cleanText.length < 3) {
-      return res.status(200).send('OK (empty)');
-    }
-
-    // Создаем уникальный ключ
-    const messageKey = crypto.createHash('md5')
-      .update(cleanText)
-      .digest('hex');
-
-    // Проверяем дубликаты
-    if (messageStore.has(messageKey)) {
+    // 2. Если есть маркеры списка (-, •, *) - берем текст после первого маркера
+    const bulletPoints = ['- ', '• ', '* '];
+    bulletPoints.forEach(marker => {
+      if (cleanText.includes(marker)) {
+        cleanText = cleanText.split(marker).pop();
+      }
+    });
+    
+    // 3. Удаляем временные метки (1:25)
+    cleanText = cleanText.replace(/\d{1,2}:\d{2}/g, '').trim();
+    
+    // 4. Защита от дублей (если текст не изменился и прошло < 5 сек)
+    const now = Date.now();
+    if (cleanText === lastMessage.text && now - lastMessage.time < 5000) {
       return res.status(200).send('OK (duplicate)');
     }
-
-    // Сохраняем сообщение
-    messageStore.set(messageKey, Date.now());
     
-    // Очищаем старые записи
-    if (messageStore.size > MAX_STORE_SIZE) {
-      const oldest = [...messageStore.entries()]
-        .sort((a, b) => a[1] - b[1])
-        .slice(0, 10);
-      oldest.forEach(([key]) => messageStore.delete(key));
+    // 5. Обновляем кэш
+    lastMessage.text = cleanText;
+    lastMessage.time = now;
+    
+    // 6. Отправляем только если текст не пустой
+    if (cleanText.length > 3) {
+      await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        chat_id: CHAT_ID,
+        text: `📢 ${cleanText}`,
+        parse_mode: 'Markdown'
+      });
     }
-
-    // Отправляем в Telegram
-    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      chat_id: CHAT_ID,
-      text: `📌 ${cleanText.slice(0, 250)}`, // Обрезаем длинные сообщения
-      parse_mode: 'Markdown'
-    });
-
+    
     res.status(200).send('OK');
   } catch (error) {
     console.error('Ошибка:', error.message);
